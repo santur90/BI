@@ -1,0 +1,16 @@
+# GitHub Pages Configuration
+
+# Build settings
+markdown: kramdown
+
+# Site settings
+title: "Bioinformatics Analysis Platform"
+description: "DNAme & RNA-seq Analysis in Your Browser"
+baseurl: ""
+url: "https://santur90.github.io/BI"
+
+# Collections
+collections:
+  docs:
+    output: true
+    permalink: /docs/:path/
