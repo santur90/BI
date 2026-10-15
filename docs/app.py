@@ -26,7 +26,7 @@ WORKER_URL = "https://bi-ai.yyqin90.workers.dev/"
 async def call_ai(module, summary, question=""):
     """POST the aggregate summary to the Worker. Returns (answer, error)."""
     if not WORKER_URL.startswith("http"):
-        return None, "AI 服务尚未配置（WORKER_URL 未设置）。"
+        return None, "AI service is not configured (WORKER_URL is not set)."
     try:
         from pyodide.http import pyfetch
 
@@ -41,25 +41,25 @@ async def call_ai(module, summary, question=""):
         except Exception:
             data = {}
         if resp.status != 200:
-            return None, f"AI 服务返回错误（HTTP {resp.status}）：{data.get('error', '请稍后重试')}"
+            return None, f"AI service returned an error (HTTP {resp.status}): {data.get('error', 'please try again later')}"
         answer = data.get("answer")
         if not answer:
-            return None, "AI 服务未返回有效内容，请稍后重试。"
+            return None, "The AI service returned no valid content. Please try again later."
         return answer, None
     except Exception:
-        return None, "无法连接 AI 服务，请检查网络后重试。"
+        return None, "Unable to reach the AI service. Please check your network and try again."
 
 
 async def ai_panel(module, summary):
     key = "".join(ch if ch.isalnum() else "_" for ch in module)
     st.divider()
-    st.subheader("✨ AI 解读")
-    with st.expander("将发送给 AI 的摘要（仅汇总统计，不含原始数据）"):
+    st.subheader("✨ AI Interpretation")
+    with st.expander("Summary that will be sent to the AI (aggregate statistics only, no raw data)"):
         st.code(summary, language="text")
-    consent = st.checkbox("我同意将上述摘要发送给 AI 进行解读", key=f"ai_consent_{key}")
-    question = st.text_input("可选：补充你的问题", key=f"ai_question_{key}", max_chars=500)
-    if st.button("AI 解读", key=f"ai_btn_{key}", disabled=not consent):
-        with st.spinner("AI 正在解读，请稍候..."):
+    consent = st.checkbox("I agree to send the summary above to the AI for interpretation", key=f"ai_consent_{key}")
+    question = st.text_input("Optional: add your question", key=f"ai_question_{key}", max_chars=500)
+    if st.button("Interpret with AI", key=f"ai_btn_{key}", disabled=not consent):
+        with st.spinner("AI is interpreting, please wait..."):
             answer, error = await call_ai(module, summary, question)
         st.session_state[f"ai_result_{key}"] = {"answer": answer, "error": error, "summary": summary}
     result = st.session_state.get(f"ai_result_{key}")
@@ -69,8 +69,8 @@ async def ai_panel(module, summary):
         else:
             st.markdown(result["answer"])
             if result["summary"] != summary:
-                st.caption("注意：分析参数已变化，以上解读基于之前的摘要。")
-    st.caption("⚠️ AI 生成，仅供参考，请结合原始结果判断。")
+                st.caption("Note: analysis settings have changed; the interpretation above is based on the earlier summary.")
+    st.caption("⚠️ AI-generated, for reference only. Please verify against the original results.")
 
 
 def _num(x, digits=4):
@@ -637,7 +637,7 @@ st.title("🧬 Bioinformatics Data Analysis Platform")
 st.markdown(
     """
 Run mutation, methylation, expression, PPI, and survival analyses directly in your browser.
-**隐私说明：** 原始数据仅在浏览器中处理，不会上传。使用 AI 解读时，仅在你确认后发送汇总统计结果。
+**Privacy Note:** Raw data is processed only in your browser and is never uploaded. When you use AI interpretation, only summary statistics are sent, and only after you confirm.
 """
 )
 

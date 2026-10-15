@@ -13,8 +13,8 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { headers: cors });
     if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
-    // 诊断 1：binding 是否存在
-    if (!env.AI) return json({ error: "env.AI is undefined", hint: "binding 名称不是 AI 或未生效" }, 500);
+    // Diagnostic 1: is the binding present?
+    if (!env.AI) return json({ error: "env.AI is undefined", hint: "Binding name is not AI or has not taken effect" }, 500);
 
     let body;
     try {
@@ -41,21 +41,22 @@ export default {
 
     try {
         const result = await env.AI.run("@cf/google/gemma-4-26b-a4b-it", {
-          messages, max_tokens: 800
+          messages,
+          max_tokens: 2048
         });
 
-        const answer =
-          result?.choices?.[0]?.message?.content ||
-          result?.response ||
-          null;
+        const choice = result?.choices?.[0];
+        const answer = choice?.message?.content || result?.response || null;
+        const finish = choice?.finish_reason || null;
 
         if (!answer) {
-          return json({ error: "Empty answer from model", finish_reason: result?.choices?.[0]?.finish_reason || null }, 502);
+          return json({ error: "Empty answer from model", finish_reason: finish }, 502);
         }
-        return json({ answer: answer.trim() });
+        return json({ answer: answer.trim(), finish_reason: finish });
+
     } catch (e) {
       console.error("AI error:", e);
-      // 诊断 2：返回真实错误
+      // Diagnostic 2: return the real error
       return json({
         error: "AI request failed",
         detail: String(e?.message || e),
