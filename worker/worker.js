@@ -40,14 +40,19 @@ export default {
     ];
 
     try {
-      const result = await env.AI.run("@cf/zai-org/glm-4.7-flash", {
-      messages, max_tokens: 800
-      });
-      const answer =
-        result?.response ??
-        result?.choices?.[0]?.message?.content ??
-        JSON.stringify(result);
-      return json({ answer });
+        const result = await env.AI.run("@cf/google/gemma-4-26b-a4b-it", {
+          messages, max_tokens: 800
+        });
+
+        const answer =
+          result?.choices?.[0]?.message?.content ||
+          result?.response ||
+          null;
+
+        if (!answer) {
+          return json({ error: "Empty answer from model", finish_reason: result?.choices?.[0]?.finish_reason || null }, 502);
+        }
+        return json({ answer: answer.trim() });
     } catch (e) {
       console.error("AI error:", e);
       // 诊断 2：返回真实错误
