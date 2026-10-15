@@ -1,5 +1,6 @@
 import io
 import itertools
+import json
 import urllib.parse
 import urllib.request
 
@@ -12,6 +13,131 @@ import streamlit as st
 from scipy import stats
 
 st.set_page_config(page_title="BioInfo Analysis", layout="wide")
+
+# ---------------------------------------------------------------------------
+# AI interpretation (optional). Replace with the URL of your deployed
+# Cloudflare Worker (see worker/worker.js), e.g.
+# "https://bi-ai.<your-subdomain>.workers.dev". Left as the placeholder, the
+# AI panel shows a "not configured" notice and sends nothing.
+# ---------------------------------------------------------------------------
+WORKER_URL = "https://bi-ai.yyqin90.workers.dev/"
+
+
+async def call_ai(module, summary, question=""):
+    """POST the aggregate summary to the Worker. Returns (answer, error)."""
+    if not WORKER_URL.startswith("http"):
+        return None, "AI 服务尚未配置（WORKER_URL 未设置）。"
+    try:
+        from pyodide.http import pyfetch
+
+        resp = await pyfetch(
+            WORKER_URL,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps({"module": module, "context": summary, "question": question}),
+        )
+        try:
+            data = await resp.json()
+        except Exception:
+            data = {}
+        if resp.status != 200:
+            return None, f"AI 服务返回错误（HTTP {resp.status}）：{data.get('error', '请稍后重试')}"
+        answer = data.get("answer")
+        if not answer:
+            return None, "AI 服务未返回有效内容，请稍后重试。"
+        return answer, None
+    except Exception:
+        return None, "无法连接 AI 服务，请检查网络后重试。"
+
+
+async def ai_panel(module, summary):
+    key = "".join(ch if ch.isalnum() else "_" for ch in module)
+    st.divider()
+    st.subheader("✨ AI 解读")
+    with st.expander("将发送给 AI 的摘要（仅汇总统计，不含原始数据）"):
+        st.code(summary, language="text")
+    consent = st.checkbox("我同意将上述摘要发送给 AI 进行解读", key=f"ai_consent_{key}")
+    question = st.text_input("可选：补充你的问题", key=f"ai_question_{key}", max_chars=500)
+    if st.button("AI 解读", key=f"ai_btn_{key}", disabled=not consent):
+        with st.spinner("AI 正在解读，请稍候..."):
+            answer, error = await call_ai(module, summary, question)
+        st.session_state[f"ai_result_{key}"] = {"answer": answer, "error": error, "summary": summary}
+    result = st.session_state.get(f"ai_result_{key}")
+    if result:
+        if result["error"]:
+            st.warning(result["error"])
+        else:
+            st.markdown(result["answer"])
+            if result["summary"] != summary:
+                st.caption("注意：分析参数已变化，以上解读基于之前的摘要。")
+    st.caption("⚠️ AI 生成，仅供参考，请结合原始结果判断。")
+
+
+def _num(x, digits=4):
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return "NA"
+    return "NA" if np.isnan(x) else f"{x:.{digits}g}"
+
+
+def summarize_vaf(summary, pval_text):
+    lines = ["Module: Mutation VAF comparison", "Per-group VAF (group: n, mean, median, std):"]
+    for _, r in summary.iterrows():
+        lines.append(f"- {r.iloc[0]}: n={int(r['count'])}, mean={_num(r['mean'])}, median={_num(r['median'])}, std={_num(r['std'])}")
+    lines.append(pval_text)
+    return "\n".join(lines)
+
+
+def summarize_dmr(dmr, g1, g2):
+    top = dmr.reindex(dmr["delta_beta"].abs().sort_values(ascending=False).index).head(20)
+    lines = [
+        "Module: DNA methylation DMR",
+        f"Comparison: {g1} minus {g2}; regions tested: {len(dmr)}; regions with FDR<=0.05: {int((dmr['fdr'] <= 0.05).sum())}",
+        "Top 20 regions by |delta beta| (region, delta_beta, p_value, fdr):",
+    ]
+    for _, r in top.iterrows():
+        lines.append(f"- {r['region']}: delta_beta={_num(r['delta_beta'])}, p={_num(r['p_value'])}, fdr={_num(r['fdr'])}")
+    return "\n".join(lines)
+
+
+def summarize_deg(deg, g1, g2, n1, n2):
+    padj_sig = deg[deg["fdr"] < 0.05]
+    top = deg.sort_values("fdr").head(30)
+    lines = [
+        "Module: Microarray/RNA-seq differential expression",
+        f"Comparison: {g1} (n={n1}) vs {g2} (n={n2}); genes tested: {len(deg)}",
+        f"Significant genes (padj<0.05): {len(padj_sig)}; up: {int((padj_sig['log2FC'] > 0).sum())}; down: {int((padj_sig['log2FC'] < 0).sum())}",
+        "Top 30 genes by padj (gene, log2FC, padj):",
+    ]
+    for _, r in top.iterrows():
+        lines.append(f"- {r['gene']}: log2FC={_num(r['log2FC'])}, padj={_num(r['fdr'])}")
+    return "\n".join(lines)
+
+
+def summarize_ppi(graph):
+    hubs = sorted(graph.degree, key=lambda kv: kv[1], reverse=True)[:15]
+    lines = [
+        "Module: PPI network",
+        f"Nodes: {graph.number_of_nodes()}; edges: {graph.number_of_edges()}",
+        "Top 15 hub genes by degree (gene, degree):",
+    ]
+    lines += [f"- {g}: {d}" for g, d in hubs]
+    return "\n".join(lines)
+
+
+def summarize_survival(surv, groups, group_col, time_col, status_col, logrank_p, cox_lines):
+    lines = ["Module: Survival analysis (Kaplan-Meier + Cox)", "Median survival per group (group: n, events, median time):"]
+    for grp in groups:
+        sub = surv[surv[group_col] == grp]
+        xs, ys = km_curve(sub[time_col].values, sub[status_col].values)
+        below = [x for x, y in zip(xs, ys) if y <= 0.5]
+        median = _num(below[0]) if below else "not reached"
+        lines.append(f"- {grp}: n={len(sub)}, events={int(sub[status_col].sum())}, median={median}")
+    lines.append(f"Log-rank p-value: {_num(logrank_p)}")
+    lines.append("Cox model (term: HR, p):")
+    lines += cox_lines
+    return "\n".join(lines)
 
 
 def read_table(uploaded_file, index_col=None):
@@ -124,7 +250,7 @@ def km_curve(time, status):
     return xs, ys
 
 
-def run_mutation_module():
+async def run_mutation_module():
     st.subheader("Mutation Analysis: Compare VAF Between Groups")
     st.caption("Input columns: group, vaf, and optional gene.")
 
@@ -165,16 +291,21 @@ def run_mutation_module():
     st.pyplot(fig)
 
     groups = [g[vaf_col].values for _, g in work_df.groupby(group_col)]
+    test_text = "Test: not run (fewer than 2 groups)"
     if len(groups) >= 2:
         if len(groups) == 2:
             stat, pval = stats.ttest_ind(groups[0], groups[1], equal_var=False, nan_policy="omit")
             st.write(f"Two-group t-test p-value: {pval:.4g}")
+            test_text = f"Welch two-group t-test p-value: {_num(pval)}"
         else:
             stat, pval = stats.f_oneway(*groups)
             st.write(f"One-way ANOVA p-value: {pval:.4g}")
+            test_text = f"One-way ANOVA p-value: {_num(pval)}"
+
+    await ai_panel("Mutation (VAF)", summarize_vaf(summary, test_text))
 
 
-def run_methylation_module():
+async def run_methylation_module():
     st.subheader("DNA Methylation: DMR Analysis")
     st.caption("Input long-format columns: region, group, beta.")
 
@@ -232,8 +363,10 @@ def run_methylation_module():
     ax.set_title("DMR Volcano Plot")
     st.pyplot(fig)
 
+    await ai_panel("DNA Methylation (DMR)", summarize_dmr(dmr, g1, g2))
 
-def run_deg_module():
+
+async def run_deg_module():
     st.subheader("Microarray/RNA-seq: DEG + Heatmap")
     st.caption("Expression matrix: rows=genes, columns=samples. Metadata columns: sample, group.")
 
@@ -327,6 +460,8 @@ def run_deg_module():
         ax.set_title("Top Significant DEG Heatmap (row z-score)")
         st.pyplot(fig)
 
+    await ai_panel("Microarray/RNA-seq (DEG)", summarize_deg(deg, g1, g2, len(g1_samples), len(g2_samples)))
+
 
 def fetch_string_edges(proteins, species=9606, score_cutoff=400):
     identifiers = "%0d".join(proteins)
@@ -353,7 +488,7 @@ def fetch_string_edges(proteins, species=9606, score_cutoff=400):
     return frame[["preferredName_A", "preferredName_B", "score"]].values.tolist()
 
 
-def run_ppi_module():
+async def run_ppi_module():
     st.subheader("PPI Network: Protein Name Input")
     st.caption("Enter proteins separated by comma, space, or line break. Example: TP53, EGFR, BRCA1, MDM2")
 
@@ -405,9 +540,14 @@ def run_ppi_module():
 
         edge_df = pd.DataFrame([(u, v, graph[u][v]["weight"]) for u, v in graph.edges], columns=["protein_a", "protein_b", "score"])
         st.dataframe(edge_df.sort_values("score", ascending=False))
+        st.session_state["ppi_ai_summary"] = summarize_ppi(graph)
+
+    # Outside the button branch so the panel survives the rerun its own widgets trigger.
+    if "ppi_ai_summary" in st.session_state:
+        await ai_panel("PPI Network", st.session_state["ppi_ai_summary"])
 
 
-def run_survival_module():
+async def run_survival_module():
     st.subheader("Survival Analysis: KM Curve + Cox")
     st.caption("Input columns: time, status (1=event, 0=censored), group. Optional numeric covariates are used for Cox model.")
 
@@ -454,6 +594,7 @@ def run_survival_module():
         cox_ready = pd.concat([cox_ready, surv[num_covars]], axis=1)
     cox_ready = pd.get_dummies(cox_ready, columns=[group_col], drop_first=True)
 
+    cox_lines = []
     try:
         from lifelines import CoxPHFitter
 
@@ -461,6 +602,8 @@ def run_survival_module():
         model.fit(cox_ready, duration_col=time_col, event_col=status_col)
         st.write("Cox model summary")
         st.dataframe(model.summary)
+        for term, r in model.summary.iterrows():
+            cox_lines.append(f"- {term}: HR={_num(r['exp(coef)'])}, p={_num(r['p'])}")
     except Exception as err:
         st.warning("CoxPHFitter not available in current runtime. Falling back to event-rate hazard ratio summary.")
         rows = []
@@ -472,15 +615,29 @@ def run_survival_module():
             hz = sub[status_col].sum() / np.clip(sub[time_col].sum(), 1e-9, None)
             hr = hz / np.clip(ref_hazard, 1e-9, None)
             rows.append({"comparison": f"{grp} vs {ref}", "hazard_rate_ratio": hr})
+            cox_lines.append(f"- {grp} vs {ref} (crude event-rate ratio, not a Cox fit): HR={_num(hr)}")
         st.dataframe(pd.DataFrame(rows))
         st.caption(f"Fallback reason: {err}")
+
+    logrank_p = float("nan")
+    try:
+        from lifelines.statistics import multivariate_logrank_test
+
+        logrank_p = multivariate_logrank_test(surv[time_col], surv[group_col], surv[status_col]).p_value
+    except Exception:
+        pass
+
+    await ai_panel(
+        "Survival (KM + Cox)",
+        summarize_survival(surv, groups, group_col, time_col, status_col, logrank_p, cox_lines),
+    )
 
 
 st.title("🧬 Bioinformatics Data Analysis Platform")
 st.markdown(
     """
 Run mutation, methylation, expression, PPI, and survival analyses directly in your browser.
-**Privacy Note:** Your data is processed locally in your browser and is never uploaded to any server.
+**隐私说明：** 原始数据仅在浏览器中处理，不会上传。使用 AI 解读时，仅在你确认后发送汇总统计结果。
 """
 )
 
@@ -500,15 +657,15 @@ module = st.sidebar.radio(
 )
 
 if module == "Mutation (VAF)":
-    run_mutation_module()
+    await run_mutation_module()
 elif module == "DNA Methylation (DMR)":
-    run_methylation_module()
+    await run_methylation_module()
 elif module == "Microarray/RNA-seq (DEG)":
-    run_deg_module()
+    await run_deg_module()
 elif module == "PPI Network":
-    run_ppi_module()
+    await run_ppi_module()
 elif module == "Survival (KM + Cox)":
-    run_survival_module()
+    await run_survival_module()
 
 st.sidebar.markdown("---")
 st.sidebar.info("Framework: Stlite (Python in Browser)")
